@@ -8,31 +8,31 @@ from ryu.lib.packet import packet, ethernet, ether_types
 from ryu.lib import hub
 
 import time
+import threading
+from flask import Flask, jsonify, request
 
 class DoSProtector(app_manager.RyuApp):
-    # Specifica la versione OpenFlow usata (1.3)
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
         super(DoSProtector, self).__init__(*args, **kwargs)
-        # Mappa MAC → porta per ogni switch (usato per apprendimento L2)
         self.mac_to_port = {}
-        # Switch attivi
         self.datapaths = {}
-        # Statistiche per ogni porta (usate per throughput)
         self.port_stats = {}  # {dpid: {port_no: (last_rx_bytes, last_timestamp)}}
-        # Soglia oltre la quale consideriamo un attacco (in Byte/s)
-        self.threshold = 350_000  # 350 kB/s
-        # Ogni quanti secondi leggere le statistiche
-        self.monitor_interval = 2  # più reattivo
-        # Mappa per tenere traccia delle porte già bloccate
+        self.threshold = 1_000_000  # Default: 1 MB/s
+        self.monitor_interval = 2  # more reactive
         self.alarmed_ports = {}  # (dpid, port_no): bool
-        # Thread per il monitoraggio
         self.monitor_thread = None
-        # DPID attesi (topologia conosciuta)
         self.expected_dpids = {1, 2, 3, 4}
 
-    # Gestisce evento iniziale: installa flow-table di default
+        # REST API state
+        self.status_snapshot = {}  # {(dpid, port): {throughput, alarmed, timestamp}}
+
+        # Flask server in background
+        self.api_thread = threading.Thread(target=self._start_rest_server)
+        self.api_thread.daemon = True
+        self.api_thread.start()
+
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
@@ -41,14 +41,12 @@ class DoSProtector(app_manager.RyuApp):
             self.logger.warning("Ignoring unknown datapath: %s", datapath.id)
             return
 
-        # Flow table di default: invia tutto al controller
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions)
 
-    # Funzione per aggiungere una nuova regola di flusso (flow)
     def add_flow(self, datapath, priority, match, actions, buffer_id=None):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -62,7 +60,6 @@ class DoSProtector(app_manager.RyuApp):
                                      match=match, instructions=inst)
         datapath.send_msg(mod)
 
-    # Registra o rimuove switch nel controller
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, CONFIG_DISPATCHER])
     def _state_change_handler(self, ev):
         datapath = ev.datapath
@@ -76,7 +73,6 @@ class DoSProtector(app_manager.RyuApp):
                 self.logger.info("Register datapath: %016x", datapath.id)
                 self.datapaths[datapath.id] = datapath
 
-            # Avvia thread di monitoraggio solo se tutti gli switch sono online
             if self.monitor_thread is None and len(self.datapaths) >= len(self.expected_dpids):
                 self.logger.info("Starting monitor thread (all switches registered)")
                 self.monitor_thread = hub.spawn(self._monitor)
@@ -86,20 +82,17 @@ class DoSProtector(app_manager.RyuApp):
                 self.logger.info("Unregister datapath: %016x", datapath.id)
                 del self.datapaths[datapath.id]
 
-    # Thread che chiede regolarmente le statistiche
     def _monitor(self):
         while True:
             for dp in self.datapaths.values():
                 self._request_stats(dp)
             hub.sleep(self.monitor_interval)
 
-    # Invia richiesta di statistiche porta a uno switch
     def _request_stats(self, datapath):
         parser = datapath.ofproto_parser
         req = parser.OFPPortStatsRequest(datapath, 0, datapath.ofproto.OFPP_ANY)
         datapath.send_msg(req)
 
-    # Analizza la risposta con le statistiche e valuta il throughput
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def _port_stats_reply_handler(self, ev):
         body = ev.msg.body
@@ -110,7 +103,6 @@ class DoSProtector(app_manager.RyuApp):
             port_no = stat.port_no
             rx_bytes = stat.rx_bytes
 
-            # Ignora le porte speciali come LOCAL (4294967294)
             if port_no >= 0xffffff00:
                 continue
 
@@ -122,30 +114,30 @@ class DoSProtector(app_manager.RyuApp):
 
             self.logger.info("DPID %s Port %s Throughput: %.2f B/s", dpid, port_no, throughput)
 
-            # Se supera la soglia, blocca
             if throughput > self.threshold:
                 if not self.alarmed_ports.get(key, False):
                     self.logger.warning("!!! ALERT: High traffic on DPID %s port %s. Blocking...", dpid, port_no)
                     self._block_port(ev.msg.datapath, port_no)
                     self.alarmed_ports[key] = True
             else:
-                # Se ritorna sotto la soglia, sblocca
                 if self.alarmed_ports.get(key, False):
                     self.logger.info("Traffic normalized on DPID %s port %s. Unblocking...", dpid, port_no)
                     self._unblock_port(ev.msg.datapath, port_no)
                     self.alarmed_ports[key] = False
 
-            # Aggiorna stato attuale
             self.port_stats[key] = (rx_bytes, now)
+            self.status_snapshot[key] = {
+                'throughput': throughput,
+                'alarmed': self.alarmed_ports.get(key, False),
+                'timestamp': now
+            }
 
-    # Blocca una porta: aggiunge regola drop
     def _block_port(self, datapath, port_no):
         parser = datapath.ofproto_parser
         match = parser.OFPMatch(in_port=port_no)
         actions = []
         self.add_flow(datapath, priority=100, match=match, actions=actions)
 
-    # Sblocca una porta: rimuove regola drop
     def _unblock_port(self, datapath, port_no):
         parser = datapath.ofproto_parser
         match = parser.OFPMatch(in_port=port_no)
@@ -157,7 +149,6 @@ class DoSProtector(app_manager.RyuApp):
                                 match=match)
         datapath.send_msg(mod)
 
-    # Gestione pacchetti in ingresso (packet-in)
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         msg = ev.msg
@@ -169,7 +160,7 @@ class DoSProtector(app_manager.RyuApp):
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
-            return  # Ignora pacchetti LLDP (usati per discovery)
+            return
 
         dst = eth.dst
         src = eth.src
@@ -178,11 +169,9 @@ class DoSProtector(app_manager.RyuApp):
         if dpid not in self.expected_dpids:
             return
 
-        # Impara la porta sorgente
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src] = in_port
 
-        # Se conosce il MAC di destinazione, invia direttamente
         if dst in self.mac_to_port[dpid]:
             out_port = self.mac_to_port[dpid][dst]
         else:
@@ -200,3 +189,37 @@ class DoSProtector(app_manager.RyuApp):
         out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
                                   in_port=in_port, actions=actions, data=msg.data)
         datapath.send_msg(out)
+
+    def _start_rest_server(self):
+        app = Flask(__name__)
+
+        @app.route('/api/status')
+        def status():
+            output = {
+                'threshold': self.threshold,
+                'ports': []
+            }
+            for key, val in self.status_snapshot.items():
+                dpid, port = key
+                output['ports'].append({
+                    'dpid': dpid,
+                    'port': port,
+                    'throughput': val['throughput'],
+                    'alarmed': val['alarmed'],
+                    'timestamp': val['timestamp']
+                })
+            return jsonify(output)
+
+        @app.route('/api/threshold', methods=['POST'])
+        def update_threshold():
+            data = request.get_json()
+            if 'threshold' in data:
+                try:
+                    new_thresh = int(data['threshold'])
+                    self.threshold = new_thresh
+                    return jsonify({"status": "ok", "threshold": self.threshold})
+                except Exception as e:
+                    return jsonify({"status": "error", "message": str(e)}), 400
+            return jsonify({"status": "error", "message": "Missing threshold"}), 400
+
+        app.run(port=5001, host='0.0.0.0')
