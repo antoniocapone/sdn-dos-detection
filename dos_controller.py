@@ -29,7 +29,7 @@ class DoSProtector(app_manager.RyuApp):
         self.status_snapshot = {}  # {(dpid, port): {throughput, alarmed, timestamp}}
 
         # Flask server in background
-        self.api_thread = threading.Thread(target=self._start_rest_server)
+        self.api_thread = threading.Thread(target = self._start_rest_server)
         self.api_thread.daemon = True
         self.api_thread.start()
 
@@ -53,11 +53,11 @@ class DoSProtector(app_manager.RyuApp):
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
 
         if buffer_id:
-            mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
-                                     priority=priority, match=match, instructions=inst)
+            mod = parser.OFPFlowMod(datapath = datapath, buffer_id = buffer_id,
+                                     priority = priority, match = match, instructions = inst)
         else:
-            mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
-                                     match=match, instructions=inst)
+            mod = parser.OFPFlowMod(datapath = datapath, priority = priority,
+                                     match = match, instructions = inst)
         datapath.send_msg(mod)
 
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, CONFIG_DISPATCHER])
@@ -136,17 +136,17 @@ class DoSProtector(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         match = parser.OFPMatch(in_port=port_no)
         actions = []
-        self.add_flow(datapath, priority=100, match=match, actions=actions)
+        self.add_flow(datapath, priority = 100, match = match, actions = actions)
 
     def _unblock_port(self, datapath, port_no):
         parser = datapath.ofproto_parser
-        match = parser.OFPMatch(in_port=port_no)
-        mod = parser.OFPFlowMod(datapath=datapath,
-                                command=datapath.ofproto.OFPFC_DELETE,
-                                out_port=datapath.ofproto.OFPP_ANY,
-                                out_group=datapath.ofproto.OFPG_ANY,
-                                priority=100,
-                                match=match)
+        match = parser.OFPMatch(in_port = port_no)
+        mod = parser.OFPFlowMod(datapath = datapath,
+                                command = datapath.ofproto.OFPFC_DELETE,
+                                out_port = datapath.ofproto.OFPP_ANY,
+                                out_group = datapath.ofproto.OFPG_ANY,
+                                priority = 100,
+                                match = match)
         datapath.send_msg(mod)
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -178,7 +178,7 @@ class DoSProtector(app_manager.RyuApp):
             out_port = ofproto.OFPP_FLOOD
 
         actions = [parser.OFPActionOutput(out_port)]
-        match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
+        match = parser.OFPMatch(in_port = in_port, eth_dst = dst, eth_src = src)
 
         if msg.buffer_id != ofproto.OFP_NO_BUFFER:
             self.add_flow(datapath, 1, match, actions, msg.buffer_id)
@@ -186,8 +186,8 @@ class DoSProtector(app_manager.RyuApp):
         else:
             self.add_flow(datapath, 1, match, actions)
 
-        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
-                                  in_port=in_port, actions=actions, data=msg.data)
+        out = parser.OFPPacketOut(datapath = datapath, buffer_id = msg.buffer_id,
+                                  in_port = in_port, actions = actions, data = msg.data)
         datapath.send_msg(out)
 
     def _start_rest_server(self):
@@ -210,7 +210,7 @@ class DoSProtector(app_manager.RyuApp):
                 })
             return jsonify(output)
 
-        @app.route('/api/threshold', methods=['POST'])
+        @app.route('/api/threshold', methods = ['POST'])
         def update_threshold():
             data = request.get_json()
             if 'threshold' in data:
@@ -222,4 +222,4 @@ class DoSProtector(app_manager.RyuApp):
                     return jsonify({"status": "error", "message": str(e)}), 400
             return jsonify({"status": "error", "message": "Missing threshold"}), 400
 
-        app.run(port=5001, host='0.0.0.0')
+        app.run(port = 5001, host = '0.0.0.0')
