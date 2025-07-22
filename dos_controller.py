@@ -22,7 +22,7 @@ class DoSProtector(app_manager.RyuApp):
         # Statistiche per ogni porta (usate per throughput)
         self.port_stats = {}  # {dpid: {port_no: (last_rx_bytes, last_timestamp)}}
         # Soglia oltre la quale consideriamo un attacco (in Byte/s)
-        self.threshold = 1_000_000  # 1 MB/s
+        self.threshold = 350_000  # 350 kB/s
         # Ogni quanti secondi leggere le statistiche
         self.monitor_interval = 2  # più reattivo
         # Mappa per tenere traccia delle porte già bloccate
