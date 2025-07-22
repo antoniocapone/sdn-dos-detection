@@ -1,3 +1,6 @@
+# SDN DoS Detection 🚦
+
+
 This repository contains the source code for the "SDN DoS Detection" project, developed for the "Network and Cloud Infrastructures" course at "Università degli Studi di Napoli Federico II", during the 2024/25 academic year.
 
 A real-time Denial of Service (DoS) detection and mitigation system built using *Software Defined Networking (SDN)* principles. This project leverages *Mininet* to simulate a network environment, *Ryu* as the SDN controller, and the *OpenFlow* protocol to dynamically monitor and control traffic at the network edge.
